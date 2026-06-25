@@ -2,6 +2,7 @@
 
 import pickle
 
+import cv2  # Muss vor cv_bridge importiert werden
 import numpy as np
 import rclpy
 from cv_bridge import CvBridge
@@ -18,9 +19,11 @@ from thermal_mapper.temperature_utils import gray_to_celsius, temperature_to_col
 
 def transform_to_matrix(translation, rotation):
     """4x4 Homogene Transformationsmatrix aus Translation + Quaternion."""
-    rot = Rotation.from_quat([
+    rot_obj = Rotation.from_quat([
         rotation.x, rotation.y, rotation.z, rotation.w
-    ]).as_matrix()
+    ])
+    # scipy < 1.4: as_dcm(); scipy >= 1.4: as_matrix()
+    rot = rot_obj.as_matrix() if hasattr(rot_obj, 'as_matrix') else rot_obj.as_dcm()
     mat = np.eye(4)
     mat[:3, :3] = rot
     mat[:3, 3] = [translation.x, translation.y, translation.z]
