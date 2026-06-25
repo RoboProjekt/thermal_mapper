@@ -1,4 +1,4 @@
-"""Voxel-zu-Pixel Projektion mit Z-Buffer, Splatting und Temperatur-Mapping."""
+"""Voxel-zu-Pixel Projektion mit vektorisierter Pinhole-Mathematik und PointCloud2-Output."""
 
 import pickle
 
@@ -6,15 +6,18 @@ import cv2  # Muss vor cv_bridge importiert werden
 import numpy as np
 import rclpy
 from cv_bridge import CvBridge
-from geometry_msgs.msg import Point
 from rclpy.node import Node
 from scipy.spatial.transform import Rotation
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, PointCloud2, PointField
+from std_msgs.msg import Header
 from tf2_ros import Buffer, TransformListener
-from std_msgs.msg import ColorRGBA
-from visualization_msgs.msg import Marker, MarkerArray
 
-from thermal_mapper.temperature_utils import gray_to_celsius, temperature_to_color
+try:
+    from sensor_msgs_py import point_cloud2 as pc2
+except ImportError:
+    pc2 = None
+
+from thermal_mapper.temperature_utils import grays_to_celsius, temperatures_to_rgb
 
 
 def transform_to_matrix(translation, rotation):
@@ -52,6 +55,76 @@ def load_voxel_map(path):
     return nodes, centers, voxel_size
 
 
+def z_buffer_nearest_per_pixel(ui, vi, z, global_indices, img_w, img_h):
+    """
+    Vektorisierter Z-Buffer: pro Pixel nur der naechste Voxel (kleinstes Z).
+    Gibt (global_indices, ui, vi) der Gewinner zurueck.
+    """
+    in_bounds = (
+        (ui >= 0) & (ui < img_w) &
+        (vi >= 0) & (vi < img_h)
+    )
+    if not np.any(in_bounds):
+        return (
+            np.array([], dtype=np.int64),
+            np.array([], dtype=np.int32),
+            np.array([], dtype=np.int32),
+        )
+
+    ui = ui[in_bounds].astype(np.int32)
+    vi = vi[in_bounds].astype(np.int32)
+    z = z[in_bounds]
+    g = global_indices[in_bounds]
+
+    order = np.argsort(z)
+    pixel_id = vi[order].astype(np.int64) * img_w + ui[order].astype(np.int64)
+    ui = ui[order]
+    vi = vi[order]
+    g = g[order]
+
+    _, winner_idx = np.unique(pixel_id, return_index=True)
+    return g[winner_idx], ui[winner_idx], vi[winner_idx]
+
+
+def build_xyzrgb_cloud(header, points, colors_uint8):
+    """Erzeugt sensor_msgs/PointCloud2 mit XYZ + RGB (vektorisiert)."""
+    n = points.shape[0]
+    structured = np.empty(n, dtype=[
+        ('x', np.float32), ('y', np.float32), ('z', np.float32), ('rgb', np.uint32)
+    ])
+    structured['x'] = points[:, 0].astype(np.float32)
+    structured['y'] = points[:, 1].astype(np.float32)
+    structured['z'] = points[:, 2].astype(np.float32)
+    rgba = np.empty((n, 4), dtype=np.uint8)
+    rgba[:, 0] = colors_uint8[:, 0]
+    rgba[:, 1] = colors_uint8[:, 1]
+    rgba[:, 2] = colors_uint8[:, 2]
+    rgba[:, 3] = 255
+    structured['rgb'] = rgba.view(np.uint32).reshape(-1)
+
+    if pc2 is not None:
+        fields = pc2.fields_xyzrgb()
+        return pc2.create_cloud(header, fields, structured)
+
+    fields = [
+        PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+        PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+        PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+        PointField(name='rgb', offset=12, datatype=PointField.UINT32, count=1),
+    ]
+    return PointCloud2(
+        header=header,
+        height=1,
+        width=n,
+        is_dense=True,
+        is_bigendian=False,
+        fields=fields,
+        point_step=16,
+        row_step=16 * n,
+        data=structured.tobytes(),
+    )
+
+
 class ThermalProjectionNode(Node):
     def __init__(self):
         super().__init__('thermal_projection_node')
@@ -63,7 +136,8 @@ class ThermalProjectionNode(Node):
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('camera_frame', 'siyi_lens')
         self.declare_parameter('image_topic', '/siyi/thermal/image_raw')
-        self.declare_parameter('marker_topic', '/thermal/voxel_markers')
+        self.declare_parameter('cloud_topic', '/thermal/voxel_cloud')
+        self.declare_parameter('frame_skip', 5)
         self.declare_parameter('image_width', 640)
         self.declare_parameter('image_height', 512)
         self.declare_parameter('fx', 320.0)
@@ -78,7 +152,8 @@ class ThermalProjectionNode(Node):
         self.map_frame = self.get_parameter('map_frame').value
         self.camera_frame = self.get_parameter('camera_frame').value
         self.image_topic = self.get_parameter('image_topic').value
-        self.marker_topic = self.get_parameter('marker_topic').value
+        self.cloud_topic = self.get_parameter('cloud_topic').value
+        self.frame_skip = max(1, int(self.get_parameter('frame_skip').value))
         self.img_w = int(self.get_parameter('image_width').value)
         self.img_h = int(self.get_parameter('image_height').value)
         self.fx = float(self.get_parameter('fx').value)
@@ -92,30 +167,37 @@ class ThermalProjectionNode(Node):
         self.voxel_nodes, self.voxel_centers, self.voxel_size = load_voxel_map(map_path)
         self.get_logger().info(
             f'Karte geladen: {len(self.voxel_nodes)} Voxel, '
-            f'voxel_size={self.voxel_size:.3f} m'
+            f'voxel_size={self.voxel_size:.3f} m, frame_skip={self.frame_skip}'
         )
+        if pc2 is None:
+            self.get_logger().warn(
+                'sensor_msgs_py nicht gefunden – PointCloud2-Fallback aktiv. '
+                'Installieren: sudo apt install ros-foxy-sensor-msgs-py'
+            )
 
-        # Laufender Temperatur-Mittelwert pro Voxel-Index
-        self.temp_accum = {}
-        self.temp_counts = {}
+        self.temp_accum = np.zeros(len(self.voxel_centers), dtype=np.float64)
+        self.temp_counts = np.zeros(len(self.voxel_centers), dtype=np.int32)
 
         self.bridge = CvBridge()
-        self.latest_image = None
+        self._frame_counter = 0
         self.image_received = False
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        self.marker_pub = self.create_publisher(MarkerArray, self.marker_topic, 10)
+        self.cloud_pub = self.create_publisher(PointCloud2, self.cloud_topic, 10)
         self.create_subscription(Image, self.image_topic, self.image_callback, 10)
 
     def image_callback(self, msg):
-        self.latest_image = msg
         if not self.image_received:
             self.get_logger().info(
                 f'Bild empfangen: {msg.width}x{msg.height}, encoding={msg.encoding}'
             )
             self.image_received = True
+
+        self._frame_counter += 1
+        if self._frame_counter % self.frame_skip != 0:
+            return
 
         try:
             self.process_frame(msg)
@@ -136,7 +218,7 @@ class ThermalProjectionNode(Node):
         x = points_cam[:, 0]
         y = points_cam[:, 1]
         z = points_cam[:, 2]
-        optical = np.zeros_like(points_cam)
+        optical = np.empty_like(points_cam)
         optical[:, 0] = -y
         optical[:, 1] = -z
         optical[:, 2] = x
@@ -157,10 +239,9 @@ class ThermalProjectionNode(Node):
             tf_msg.transform.rotation
         )
 
-        # Homogene Koordinaten: map -> camera
-        ones = np.ones((len(self.voxel_centers), 1))
-        pts_h = np.hstack([self.voxel_centers, ones])
-        pts_cam = (mat @ pts_h.T).T[:, :3]
+        # Vektorisiert: alle Voxel map -> Kamera
+        ones = np.ones((len(self.voxel_centers), 1), dtype=np.float64)
+        pts_cam = (mat @ np.hstack([self.voxel_centers, ones]).T).T[:, :3]
         pts_cam = self._to_optical(pts_cam)
 
         z = pts_cam[:, 2]
@@ -168,99 +249,50 @@ class ThermalProjectionNode(Node):
         if not np.any(valid):
             return
 
-        indices = np.where(valid)[0]
+        global_indices = np.nonzero(valid)[0]
         pts = pts_cam[valid]
         z = pts[:, 2]
 
+        # Vektorisierte Pinhole-Projektion
         u = self.fx * pts[:, 0] / z + self.cx
         v = self.fy * pts[:, 1] / z + self.cy
+        ui = np.round(u).astype(np.int32)
+        vi = np.round(v).astype(np.int32)
 
         gray = self.bridge.imgmsg_to_cv2(msg, desired_encoding='mono8')
         if gray.ndim == 3:
             gray = gray[:, :, 0]
 
-        z_buffer = np.full((self.img_h, self.img_w), np.inf, dtype=np.float32)
-        owner = np.full((self.img_h, self.img_w), -1, dtype=np.int32)
-
-        splat_radius = self.voxel_size * self.fx / z
-        half = np.maximum(1, np.round(splat_radius * 0.5).astype(np.int32))
-
-        for local_i, global_i in enumerate(indices):
-            ui = int(round(u[local_i]))
-            vi = int(round(v[local_i]))
-            if ui < 0 or ui >= self.img_w or vi < 0 or vi >= self.img_h:
-                continue
-
-            r = int(half[local_i])
-            u0 = max(0, ui - r)
-            u1 = min(self.img_w, ui + r + 1)
-            v0 = max(0, vi - r)
-            v1 = min(self.img_h, vi + r + 1)
-
-            depth = z[local_i]
-            region_z = z_buffer[v0:v1, u0:u1]
-            update_mask = depth < region_z
-            if not np.any(update_mask):
-                continue
-
-            z_buffer[v0:v1, u0:u1][update_mask] = depth
-            owner[v0:v1, u0:u1][update_mask] = global_i
-
-        # Temperatur aus Grauwert am Splat-Zentrum fuer sichtbare Voxel
-        visible = set(owner[owner >= 0])
-        for global_i in visible:
-            local_matches = np.where(indices == global_i)[0]
-            if len(local_matches) == 0:
-                continue
-            local_i = local_matches[0]
-            ui = int(np.clip(round(u[local_i]), 0, self.img_w - 1))
-            vi = int(np.clip(round(v[local_i]), 0, self.img_h - 1))
-            gray_val = float(gray[vi, ui])
-            temp = gray_to_celsius(gray_val, self.temp_min, self.temp_max)
-
-            if global_i not in self.temp_accum:
-                self.temp_accum[global_i] = temp
-                self.temp_counts[global_i] = 1
-            else:
-                self.temp_accum[global_i] += temp
-                self.temp_counts[global_i] += 1
-
-        self.publish_markers()
-
-    def publish_markers(self):
-        if not self.temp_accum:
+        winners, win_ui, win_vi = z_buffer_nearest_per_pixel(
+            ui, vi, z, global_indices, self.img_w, self.img_h
+        )
+        if winners.size == 0:
             return
 
-        marker = Marker()
-        marker.header.frame_id = self.map_frame
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = 'thermal_voxels'
-        marker.id = 0
-        marker.type = Marker.CUBE_LIST
-        marker.action = Marker.ADD
-        marker.scale.x = self.voxel_size
-        marker.scale.y = self.voxel_size
-        marker.scale.z = self.voxel_size
+        gray_vals = gray[win_vi, win_ui].astype(np.float64)
+        temps = grays_to_celsius(gray_vals, self.temp_min, self.temp_max)
 
-        for global_i, total in self.temp_accum.items():
-            count = self.temp_counts[global_i]
-            temp = total / count
-            pt = Point()
-            pt.x = float(self.voxel_centers[global_i, 0])
-            pt.y = float(self.voxel_centers[global_i, 1])
-            pt.z = float(self.voxel_centers[global_i, 2])
-            marker.points.append(pt)
-            r, g, b = temperature_to_color(temp, self.temp_min, self.temp_max)
-            color = ColorRGBA()
-            color.r = float(r)
-            color.g = float(g)
-            color.b = float(b)
-            color.a = 1.0
-            marker.colors.append(color)
+        # Laufender Temperatur-Mittelwert (vektorisiert pro Frame)
+        self.temp_accum[winners] += temps
+        self.temp_counts[winners] += 1
 
-        arr = MarkerArray()
-        arr.markers.append(marker)
-        self.marker_pub.publish(arr)
+        self.publish_point_cloud(msg.header.stamp, winners)
+
+    def publish_point_cloud(self, stamp, visible_indices):
+        counts = self.temp_counts[visible_indices]
+        if np.all(counts == 0):
+            return
+
+        avg_temps = self.temp_accum[visible_indices] / counts
+        points = self.voxel_centers[visible_indices]
+        colors = temperatures_to_rgb(avg_temps, self.temp_min, self.temp_max)
+
+        header = Header()
+        header.stamp = stamp
+        header.frame_id = self.map_frame
+
+        cloud = build_xyzrgb_cloud(header, points, colors)
+        self.cloud_pub.publish(cloud)
 
 
 def main(args=None):
