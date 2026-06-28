@@ -7,6 +7,7 @@ import numpy as np
 import rclpy
 from cv_bridge import CvBridge
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from scipy.spatial.transform import Rotation
 from sensor_msgs.msg import Image, PointCloud2, PointField
 from std_msgs.msg import Header
@@ -102,16 +103,15 @@ def build_xyzrgb_cloud(header, points, colors_uint8):
     rgba[:, 3] = 255
     structured['rgb'] = rgba.view(np.uint32).reshape(-1)
 
-    if pc2 is not None:
-        fields = pc2.fields_xyzrgb()
-        return pc2.create_cloud(header, fields, structured)
-
     fields = [
         PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
         PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
         PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
         PointField(name='rgb', offset=12, datatype=PointField.UINT32, count=1),
     ]
+    if pc2 is not None:
+        return pc2.create_cloud(header, fields, structured)
+
     return PointCloud2(
         header=header,
         height=1,
@@ -137,6 +137,8 @@ class ThermalProjectionNode(Node):
         self.declare_parameter('camera_frame', 'siyi_lens')
         self.declare_parameter('image_topic', '/siyi/thermal/image_raw')
         self.declare_parameter('cloud_topic', '/thermal/voxel_cloud')
+        self.declare_parameter('map_cloud_topic', '/thermal/map_cloud')
+        self.declare_parameter('map_cloud_color', 160)
         self.declare_parameter('frame_skip', 5)
         self.declare_parameter('image_width', 640)
         self.declare_parameter('image_height', 512)
@@ -153,6 +155,9 @@ class ThermalProjectionNode(Node):
         self.camera_frame = self.get_parameter('camera_frame').value
         self.image_topic = self.get_parameter('image_topic').value
         self.cloud_topic = self.get_parameter('cloud_topic').value
+        self.map_cloud_topic = self.get_parameter('map_cloud_topic').value
+        map_cloud_color = int(self.get_parameter('map_cloud_color').value)
+        self.map_cloud_color = np.clip(map_cloud_color, 0, 255)
         self.frame_skip = max(1, int(self.get_parameter('frame_skip').value))
         self.img_w = int(self.get_parameter('image_width').value)
         self.img_h = int(self.get_parameter('image_height').value)
@@ -186,7 +191,17 @@ class ThermalProjectionNode(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
         self.cloud_pub = self.create_publisher(PointCloud2, self.cloud_topic, 10)
+        map_qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+        self.map_cloud_pub = self.create_publisher(
+            PointCloud2, self.map_cloud_topic, map_qos
+        )
         self.create_subscription(Image, self.image_topic, self.image_callback, 10)
+
+        self.publish_map_cloud()
 
     def image_callback(self, msg):
         if not self.image_received:
@@ -277,6 +292,22 @@ class ThermalProjectionNode(Node):
         self.temp_counts[winners] += 1
 
         self.publish_point_cloud(msg.header.stamp, winners)
+
+    def publish_map_cloud(self):
+        """Publiziert die geladene Voxelkarte einmalig als neutrale PointCloud2."""
+        n = len(self.voxel_centers)
+        gray = int(self.map_cloud_color)
+        colors = np.full((n, 3), gray, dtype=np.uint8)
+
+        header = Header()
+        header.stamp = self.get_clock().now().to_msg()
+        header.frame_id = self.map_frame
+
+        cloud = build_xyzrgb_cloud(header, self.voxel_centers, colors)
+        self.map_cloud_pub.publish(cloud)
+        self.get_logger().info(
+            f'Karten-PointCloud: {n} Punkte auf {self.map_cloud_topic}'
+        )
 
     def publish_point_cloud(self, stamp, visible_indices):
         counts = self.temp_counts[visible_indices]
