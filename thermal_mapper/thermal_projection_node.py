@@ -7,7 +7,6 @@ import numpy as np
 import rclpy
 from cv_bridge import CvBridge
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from scipy.spatial.transform import Rotation
 from sensor_msgs.msg import Image, PointCloud2, PointField
 from std_msgs.msg import Header
@@ -110,19 +109,21 @@ def build_xyzrgb_cloud(header, points, colors_uint8):
         PointField(name='rgb', offset=12, datatype=PointField.UINT32, count=1),
     ]
     if pc2 is not None:
-        return pc2.create_cloud(header, fields, structured)
+        cloud = pc2.create_cloud(header, fields, structured)
+    else:
+        cloud = PointCloud2(
+            header=header,
+            height=1,
+            width=n,
+            is_dense=True,
+            is_bigendian=False,
+            fields=fields,
+            point_step=16,
+            row_step=16 * n,
+            data=structured.tobytes(),
+        )
 
-    return PointCloud2(
-        header=header,
-        height=1,
-        width=n,
-        is_dense=True,
-        is_bigendian=False,
-        fields=fields,
-        point_step=16,
-        row_step=16 * n,
-        data=structured.tobytes(),
-    )
+    return cloud
 
 
 class ThermalProjectionNode(Node):
@@ -182,6 +183,7 @@ class ThermalProjectionNode(Node):
 
         self.temp_accum = np.zeros(len(self.voxel_centers), dtype=np.float64)
         self.temp_counts = np.zeros(len(self.voxel_centers), dtype=np.int32)
+        self._map_cloud_logged = False
 
         self.bridge = CvBridge()
         self._frame_counter = 0
@@ -191,17 +193,14 @@ class ThermalProjectionNode(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
         self.cloud_pub = self.create_publisher(PointCloud2, self.cloud_topic, 10)
-        map_qos = QoSProfile(
-            depth=1,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            reliability=ReliabilityPolicy.RELIABLE,
-        )
+        # VOLATILE QoS: RViz-Default; periodisches Republish statt TRANSIENT_LOCAL
         self.map_cloud_pub = self.create_publisher(
-            PointCloud2, self.map_cloud_topic, map_qos
+            PointCloud2, self.map_cloud_topic, 10
         )
         self.create_subscription(Image, self.image_topic, self.image_callback, 10)
 
         self.publish_map_cloud()
+        self.create_timer(5.0, self.publish_map_cloud)
 
     def image_callback(self, msg):
         if not self.image_received:
@@ -294,7 +293,7 @@ class ThermalProjectionNode(Node):
         self.publish_point_cloud(msg.header.stamp, winners)
 
     def publish_map_cloud(self):
-        """Publiziert die geladene Voxelkarte einmalig als neutrale PointCloud2."""
+        """Publiziert die geladene Voxelkarte als neutrale PointCloud2 (alle 5s)."""
         n = len(self.voxel_centers)
         gray = int(self.map_cloud_color)
         colors = np.full((n, 3), gray, dtype=np.uint8)
@@ -305,9 +304,12 @@ class ThermalProjectionNode(Node):
 
         cloud = build_xyzrgb_cloud(header, self.voxel_centers, colors)
         self.map_cloud_pub.publish(cloud)
-        self.get_logger().info(
-            f'Karten-PointCloud: {n} Punkte auf {self.map_cloud_topic}'
-        )
+
+        if not self._map_cloud_logged:
+            self.get_logger().info(
+                f'Karten-PointCloud: {n} Punkte auf {self.map_cloud_topic} (Republish alle 5s)'
+            )
+            self._map_cloud_logged = True
 
     def publish_point_cloud(self, stamp, visible_indices):
         counts = self.temp_counts[visible_indices]
