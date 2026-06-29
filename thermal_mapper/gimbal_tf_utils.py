@@ -4,21 +4,23 @@ import math
 
 from geometry_msgs.msg import TransformStamped
 
-# Statischer Offset base_link -> gimbal_joint3_yaw
+# Statischer Offset base_link -> gimbal_joint3_yaw (Yaw-Rotation siehe unten)
 BASE_TO_JOINT3_TRANSLATION = (-0.0346, 0.0, 0.1554)
 
+# Kette von base_link zur Linse: 3(yaw) -> 2(roll) -> 1(pitch) -> lens
+# Yaw sitzt am unteren Gelenk (base_link -> gimbal_joint3_yaw), nicht an joint 1.
 GIMBAL_CHAIN = [
     (
         'gimbal_joint3_yaw', 'gimbal_joint2_roll',
-        (-0.040, 0.0, 0.055), 'z',
+        (-0.040, 0.0, 0.055), None, None,
     ),
     (
         'gimbal_joint2_roll', 'gimbal_joint1_pitch',
-        (0.045, 0.0, 0.0), 'x',
+        (0.045, 0.0, 0.0), 'x', 'roll',
     ),
     (
         'gimbal_joint1_pitch', 'siyi_lens',
-        (0.010, 0.0, 0.010), 'y',
+        (0.010, 0.0, 0.010), 'y', 'pitch',
     ),
 ]
 
@@ -48,8 +50,8 @@ def quat_multiply(q1, q2):
     )
 
 
-def make_static_base_transform(stamp):
-    """TransformStamped base_link -> gimbal_joint3_yaw."""
+def make_base_to_joint3_transform(stamp, yaw_deg):
+    """TransformStamped base_link -> gimbal_joint3_yaw (Montage + Yaw um Z)."""
     t = TransformStamped()
     t.header.stamp = stamp
     t.header.frame_id = 'base_link'
@@ -57,7 +59,11 @@ def make_static_base_transform(stamp):
     t.transform.translation.x = BASE_TO_JOINT3_TRANSLATION[0]
     t.transform.translation.y = BASE_TO_JOINT3_TRANSLATION[1]
     t.transform.translation.z = BASE_TO_JOINT3_TRANSLATION[2]
-    t.transform.rotation.w = 1.0
+    qx, qy, qz, qw = euler_axis_quaternion('z', yaw_deg)
+    t.transform.rotation.x = qx
+    t.transform.rotation.y = qy
+    t.transform.rotation.z = qz
+    t.transform.rotation.w = qw
     return t
 
 
@@ -68,12 +74,14 @@ def send_gimbal_transforms(
     pitch,
     roll,
     lens_mount_pitch_deg=180.0,
+    invert_yaw_tf=True,
 ):
-    """Publiziert statischen Basis-TF und dynamische Gimbal-Kette."""
-    broadcaster.sendTransform(make_static_base_transform(stamp))
+    """Publiziert Basis-TF (mit Yaw) und dynamische Gimbal-Kette."""
+    yaw_tf = -yaw if invert_yaw_tf else yaw
+    broadcaster.sendTransform(make_base_to_joint3_transform(stamp, yaw_tf))
 
-    joint_angles = [yaw, roll, pitch]
-    for i, (parent, child, translation, axis) in enumerate(GIMBAL_CHAIN):
+    angles = {'yaw': yaw_tf, 'roll': roll, 'pitch': pitch}
+    for parent, child, translation, axis, angle_key in GIMBAL_CHAIN:
         t = TransformStamped()
         t.header.stamp = stamp
         t.header.frame_id = parent
@@ -81,7 +89,10 @@ def send_gimbal_transforms(
         t.transform.translation.x = translation[0]
         t.transform.translation.y = translation[1]
         t.transform.translation.z = translation[2]
-        qx, qy, qz, qw = euler_axis_quaternion(axis, joint_angles[i])
+        if axis is None:
+            qx, qy, qz, qw = 0.0, 0.0, 0.0, 1.0
+        else:
+            qx, qy, qz, qw = euler_axis_quaternion(axis, angles[angle_key])
         if child == 'siyi_lens' and lens_mount_pitch_deg != 0.0:
             q_mount = euler_axis_quaternion('y', lens_mount_pitch_deg)
             qx, qy, qz, qw = quat_multiply((qx, qy, qz, qw), q_mount)
