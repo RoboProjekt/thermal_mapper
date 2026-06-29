@@ -25,6 +25,7 @@ setup(
             'gimbal_tf_broadcaster = thermal_mapper.gimbal_tf_broadcaster:main',
             'thermal_camera_publisher = thermal_mapper.thermal_camera_publisher:main',
             'thermal_projection_node = thermal_mapper.thermal_projection_node:main',
+            'test_siyi_gimbal = thermal_mapper.test_siyi_gimbal:main',
         ],
     },
 )

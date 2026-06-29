@@ -55,6 +55,13 @@ class SiyiGimbalDriver:
             return self.current_attitude
         return None
 
+    def set_gimbal_speed(self, yaw_speed, pitch_speed):
+        """Sendet Command 0x07 (Gimbal Speed), Wertebereich -100 bis 100."""
+        yaw_speed = max(-100, min(100, int(yaw_speed)))
+        pitch_speed = max(-100, min(100, int(pitch_speed)))
+        data = struct.pack('bb', yaw_speed, pitch_speed)
+        self.send_command(0x07, data)
+
     def telemetry_loop(self):
         while self.running:
             self.request_attitude()
@@ -72,5 +79,12 @@ class SiyiGimbalDriver:
         return thread
 
     def stop(self):
+        try:
+            self.set_gimbal_speed(0, 0)
+        except OSError:
+            pass
         self.running = False
-        self.sock.close()
+        try:
+            self.sock.close()
+        except OSError:
+            pass

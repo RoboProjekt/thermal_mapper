@@ -35,6 +35,9 @@ def generate_launch_description():
             package='tf2_ros',
             executable='static_transform_publisher',
             name='joint1_to_lens',
-            arguments=['0.010', '0.0', '0.010', '0.0', '0.0', '0.0', 'gimbal_joint1_pitch', 'siyi_lens']
+            arguments=[
+                '0.010', '0.0', '0.010', '0.0', '3.141592653589793', '0.0',
+                'gimbal_joint1_pitch', 'siyi_lens'
+            ]
         )
     ])
