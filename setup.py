@@ -23,10 +23,9 @@ setup(
     entry_points={
         'console_scripts': [
             'gimbal_tf_broadcaster = thermal_mapper.gimbal_tf_broadcaster:main',
+            'gimbal_manual_test = thermal_mapper.gimbal_manual_test:main',
             'thermal_camera_publisher = thermal_mapper.thermal_camera_publisher:main',
             'thermal_projection_node = thermal_mapper.thermal_projection_node:main',
-            'test_gimbal_sweep = thermal_mapper.test_gimbal_sweep:main',
-            'test_gimbal_step_response = thermal_mapper.test_gimbal_step_response:main',
         ],
     },
 )

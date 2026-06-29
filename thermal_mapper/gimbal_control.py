@@ -77,7 +77,6 @@ def move_to_absolute_yaw(
             tick_callback()
 
         current_abs = read_yaw(driver, fresh=True)
-        att, age_s = driver.get_attitude()
         error = linear_yaw_error(abs_target, current_abs)
         elapsed = time.monotonic() - t0
 
@@ -87,7 +86,6 @@ def move_to_absolute_yaw(
                 'current': current_abs,
                 'error': error,
                 'elapsed': elapsed,
-                'age_s': age_s,
             })
 
         if abs(error) <= tolerance_deg:
