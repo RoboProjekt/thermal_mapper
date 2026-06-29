@@ -19,6 +19,7 @@ from thermal_mapper.gimbal_control import (
     normalize_angle,
 )
 from thermal_mapper.gimbal_tf_utils import send_gimbal_transforms
+from thermal_mapper.log_utils import ts
 from thermal_mapper.siyi_driver import SiyiGimbalDriver
 
 
@@ -54,14 +55,14 @@ class GimbalManualTestNode(Node):
         self.create_timer(1.0 / rate_hz, self.publish_tf)
 
         self.get_logger().info(
-            f'Gimbal verbunden ({gimbal_ip}, lokal {local_ip}), TF aktiv'
+            f'[{ts()}] Gimbal verbunden ({gimbal_ip}, lokal {local_ip}), TF aktiv'
         )
 
     def spin_once(self):
         rclpy.spin_once(self, timeout_sec=0)
 
     def publish_tf(self):
-        att = self.driver.current_attitude
+        att, _age = self.driver.get_attitude()
         send_gimbal_transforms(
             self.broadcaster,
             self.get_clock().now().to_msg(),
@@ -77,27 +78,37 @@ class GimbalManualTestNode(Node):
             self.spin_once()
             time.sleep(0.05)
 
-    def current_yaw(self):
-        return float(self.driver.current_attitude['yaw'])
+    def format_yaw_status(self, fresh=True):
+        att, age_s = self.driver.get_attitude(fresh=fresh)
+        return (
+            f'[{ts()}] Yaw {att["yaw"]:+7.1f} deg  '
+            f'(Telemetrie-Alter {age_s * 1000:.0f} ms, '
+            f'drain {self.driver.last_drain_count})'
+        )
 
     def calibrate(self):
-        self.get_logger().info('Kalibriere Drehrichtung ...')
+        self.get_logger().info(f'[{ts()}] Kalibriere Drehrichtung ...')
         self.invert_yaw = calibrate_yaw_direction(
             self.driver,
             self.yaw_speed,
             tick_callback=self.spin_once,
         )
-        self.get_logger().info(f'Drehrichtung: invert_yaw={self.invert_yaw}')
+        self.get_logger().info(
+            f'[{ts()}] Drehrichtung: invert_yaw={self.invert_yaw}'
+        )
 
     def move_to(self, abs_target):
         abs_target = normalize_angle(abs_target)
-        self.get_logger().info(f'Fahre zu absolut {abs_target:+.1f} deg ...')
+        self.get_logger().info(
+            f'[{ts()}] Fahre zu absolut {abs_target:+.1f} deg ...'
+        )
 
         def on_update(info):
             sys.stdout.write(
-                f"\r  -> Ziel {info['target']:+6.1f} deg  "
-                f"Ist {info['current']:+6.1f} deg  "
-                f"Fehler {info['error']:+5.1f} deg  "
+                f"\r[{ts()}] -> Ziel {info['target']:+6.1f}  "
+                f"Ist {info['current']:+6.1f}  "
+                f"Fehler {info['error']:+5.1f}  "
+                f"age {info['age_s'] * 1000:4.0f}ms  "
                 f"{info['elapsed']:4.1f}s  "
             )
             sys.stdout.flush()
@@ -115,26 +126,27 @@ class GimbalManualTestNode(Node):
         print()
         flag = 'TIMEOUT' if result['timed_out'] else 'OK'
         self.get_logger().info(
-            f'[{flag}] Ziel {result["target"]:+.1f} deg, '
+            f'[{ts()}] [{flag}] Ziel {result["target"]:+.1f} deg, '
             f'erreicht {result["reached"]:+.1f} deg, '
-            f'Fehler {result["error"]:+.1f} deg'
+            f'Fehler {result["error"]:+.1f} deg, '
+            f'{result["duration_s"]:.1f}s'
         )
 
     def print_help(self):
         print()
         print('=' * 58)
-        print('Manueller Gimbal-Test (absolute Yaw-Winkel + TF)')
-        print('Eingabe = Zielwinkel in Grad, z.B. 0, 90, -180')
+        print(f'[{ts()}] Manueller Gimbal-Test (absolute Yaw + TF)')
+        print('Eingabe = absoluter Zielwinkel, z.B. 0, 90, -180')
         print('=' * 58)
         print('  <zahl>   Absoluter Ziel-Yaw')
-        print('  s        Status')
+        print('  s        Status (frische Telemetrie)')
         print('  q        Beenden')
         print()
 
     def input_loop(self):
         self.print_help()
         while self._running and rclpy.ok():
-            print(f'  Aktueller Yaw: {self.current_yaw():+7.1f} deg')
+            print(self.format_yaw_status(fresh=False))
             try:
                 raw = input('Ziel-Yaw absolut (Grad): ').strip()
             except EOFError:
@@ -145,12 +157,13 @@ class GimbalManualTestNode(Node):
                 self._running = False
                 break
             if cmd in ('', 's', 'status'):
+                print(self.format_yaw_status(fresh=True))
                 continue
 
             try:
                 self.move_to(float(raw))
             except ValueError:
-                print('Ungueltige Eingabe. Zahl, s oder q.')
+                print(f'[{ts()}] Ungueltige Eingabe. Zahl, s oder q.')
 
     def shutdown(self):
         self._running = False

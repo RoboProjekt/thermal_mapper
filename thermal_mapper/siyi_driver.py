@@ -14,7 +14,11 @@ class SiyiGimbalDriver:
         self.sock.bind((local_ip, 0))
         self.sock.settimeout(0.1)
 
+        self._sock_lock = threading.Lock()
+        self._att_lock = threading.Lock()
         self.current_attitude = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
+        self.attitude_updated_mono = 0.0
+        self.last_drain_count = 0
         self.running = True
         self.seq = 0
 
@@ -49,26 +53,66 @@ class SiyiGimbalDriver:
         """Parsen der Antwort von Command 0x0D."""
         if len(data) >= 14 and data[7] == 0x0D:
             yaw, pitch, roll = struct.unpack('<hhh', data[8:14])
-            self.current_attitude["yaw"] = yaw / 10.0
-            self.current_attitude["pitch"] = pitch / 10.0
-            self.current_attitude["roll"] = roll / 10.0
-            return self.current_attitude
-        return None
+            with self._att_lock:
+                self.current_attitude["yaw"] = yaw / 10.0
+                self.current_attitude["pitch"] = pitch / 10.0
+                self.current_attitude["roll"] = roll / 10.0
+                self.attitude_updated_mono = time.monotonic()
+            return True
+        return False
+
+    def _drain_recv(self, timeout_s=0.08):
+        """
+        Empfangspuffer leeren und neueste 0x0D-Antwort behalten.
+        Verhindert veraltete Yaw-Werte aus UDP-Backlog.
+        """
+        end = time.monotonic() + timeout_s
+        parsed = 0
+        while time.monotonic() < end:
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                self.sock.settimeout(remaining)
+                data, _ = self.sock.recvfrom(1024)
+                if self.parse_response(data):
+                    parsed += 1
+            except socket.timeout:
+                break
+        self.sock.settimeout(0.1)
+        self.last_drain_count = parsed
+        return parsed
+
+    def refresh_attitude(self, drain_timeout_s=0.08):
+        """Attitude anfordern und alle wartenden Antworten einlesen."""
+        with self._sock_lock:
+            self.request_attitude()
+            self._drain_recv(drain_timeout_s)
+
+    def get_attitude(self, fresh=False):
+        """
+        Aktuelle Attitude und Alter in Sekunden.
+        fresh=True: vor dem Lesen neu pollen (fuer Status-Anzeige).
+        """
+        if fresh:
+            self.refresh_attitude()
+        with self._att_lock:
+            age = time.monotonic() - self.attitude_updated_mono
+            return dict(self.current_attitude), age
 
     def set_gimbal_speed(self, yaw_speed, pitch_speed):
         """Sendet Command 0x07 (Gimbal Speed), Wertebereich -100 bis 100."""
         yaw_speed = max(-100, min(100, int(yaw_speed)))
         pitch_speed = max(-100, min(100, int(pitch_speed)))
         data = struct.pack('bb', yaw_speed, pitch_speed)
-        self.send_command(0x07, data)
+        with self._sock_lock:
+            self.send_command(0x07, data)
 
     def telemetry_loop(self):
         while self.running:
-            self.request_attitude()
             try:
-                data, _ = self.sock.recvfrom(1024)
-                self.parse_response(data)
-            except socket.timeout:
+                self.refresh_attitude()
+            except OSError:
                 pass
             time.sleep(0.05)  # 20 Hz
 

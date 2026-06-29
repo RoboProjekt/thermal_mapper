@@ -13,9 +13,14 @@ def angle_diff(target_deg, current_deg):
     return (target_deg - current_deg + 180.0) % 360.0 - 180.0
 
 
+def read_yaw(driver, fresh=False):
+    att, _age = driver.get_attitude(fresh=fresh)
+    return float(att['yaw'])
+
+
 def calibrate_yaw_direction(driver, yaw_speed, duration_s=0.5, tick_callback=None):
     """Kurzer Impuls: liefert +1 oder -1 fuer set_gimbal_speed Vorzeichen."""
-    start = float(driver.current_attitude['yaw'])
+    start = read_yaw(driver, fresh=True)
     driver.set_gimbal_speed(yaw_speed, 0)
     t_end = time.monotonic() + duration_s
     while time.monotonic() < t_end:
@@ -26,7 +31,7 @@ def calibrate_yaw_direction(driver, yaw_speed, duration_s=0.5, tick_callback=Non
     time.sleep(0.2)
     if tick_callback is not None:
         tick_callback()
-    delta = angle_diff(float(driver.current_attitude['yaw']), start)
+    delta = angle_diff(read_yaw(driver, fresh=True), start)
     if delta > 0.5:
         return 1
     if delta < -0.5:
@@ -55,7 +60,8 @@ def move_to_absolute_yaw(
         if tick_callback is not None:
             tick_callback()
 
-        current_abs = float(driver.current_attitude['yaw'])
+        current_abs = read_yaw(driver, fresh=True)
+        att, age_s = driver.get_attitude()
         error = angle_diff(abs_target, current_abs)
         elapsed = time.monotonic() - t0
 
@@ -65,6 +71,7 @@ def move_to_absolute_yaw(
                 'current': current_abs,
                 'error': error,
                 'elapsed': elapsed,
+                'age_s': age_s,
             })
 
         if abs(error) <= tolerance_deg:
@@ -81,7 +88,7 @@ def move_to_absolute_yaw(
     driver.set_gimbal_speed(0, 0)
     if tick_callback is not None:
         tick_callback()
-    reached_abs = float(driver.current_attitude['yaw'])
+    reached_abs = read_yaw(driver, fresh=True)
     return {
         'target': abs_target,
         'reached': reached_abs,
