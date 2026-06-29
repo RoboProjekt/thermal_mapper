@@ -11,9 +11,9 @@ def generate_launch_description():
     """
     return LaunchDescription([
         DeclareLaunchArgument(
-            'use_relative_yaw',
-            default_value='true',
-            description='Ziele relativ zum Start-Yaw (180,-180,0 = Rundum)',
+            'target_mode',
+            default_value='delta',
+            description='delta = Schritte relativ zum Yaw zu Schrittbeginn',
         ),
         DeclareLaunchArgument(
             'yaw_targets_deg',
@@ -48,7 +48,7 @@ def generate_launch_description():
             name='gimbal_sweep_node',
             output='screen',
             parameters=[{
-                'use_relative_yaw': LaunchConfiguration('use_relative_yaw'),
+                'target_mode': LaunchConfiguration('target_mode'),
                 'yaw_targets_deg': LaunchConfiguration('yaw_targets_deg'),
                 'yaw_speed': LaunchConfiguration('yaw_speed'),
                 'auto_start': LaunchConfiguration('auto_start'),
