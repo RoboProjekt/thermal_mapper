@@ -2,15 +2,23 @@
 
 import time
 
+# SIYI ZT6: Yaw ist linear, kein 360-Grad-Wrap in der Telemetrie
+SIYI_YAW_MIN = -270.0
+SIYI_YAW_MAX = 270.0
 
-def normalize_angle(deg):
-    """Winkel auf [-180, 180] Grad normalisieren."""
-    return (deg + 180.0) % 360.0 - 180.0
+# Ab dieser Fehlergroesse wird die Geschwindigkeit reduziert (weniger Overshoot)
+SLOW_ZONE_DEG = 25.0
+MIN_YAW_SPEED = 5
 
 
-def angle_diff(target_deg, current_deg):
-    """Kuerzester Winkel target - current in Grad."""
-    return (target_deg - current_deg + 180.0) % 360.0 - 180.0
+def clamp_yaw(deg):
+    """Zielwinkel auf den SIYI-Bereich begrenzen."""
+    return max(SIYI_YAW_MIN, min(SIYI_YAW_MAX, float(deg)))
+
+
+def linear_yaw_error(target_deg, current_deg):
+    """Linearer Fehler target - current (kein Umweg ueber 360 Grad)."""
+    return float(target_deg) - float(current_deg)
 
 
 def read_yaw(driver, fresh=False):
@@ -31,12 +39,20 @@ def calibrate_yaw_direction(driver, yaw_speed, duration_s=0.5, tick_callback=Non
     time.sleep(0.2)
     if tick_callback is not None:
         tick_callback()
-    delta = angle_diff(read_yaw(driver, fresh=True), start)
+    delta = linear_yaw_error(read_yaw(driver, fresh=True), start)
     if delta > 0.5:
         return 1
     if delta < -0.5:
         return -1
     return 1
+
+
+def scaled_yaw_speed(abs_error, yaw_speed):
+    """Volle Geschwindigkeit weit weg, langsamere Annaeherung nahe am Ziel."""
+    if abs_error >= SLOW_ZONE_DEG:
+        return yaw_speed
+    scale = abs_error / SLOW_ZONE_DEG
+    return max(MIN_YAW_SPEED, int(yaw_speed * scale))
 
 
 def move_to_absolute_yaw(
@@ -50,8 +66,8 @@ def move_to_absolute_yaw(
     on_update=None,
     tick_callback=None,
 ):
-    """Faehrt zum absoluten Gimbal-Yaw (SIYI-Telemetrie)."""
-    abs_target = normalize_angle(abs_target_deg)
+    """Faehrt zum absoluten Gimbal-Yaw (SIYI-Telemetrie, linear)."""
+    abs_target = clamp_yaw(abs_target_deg)
     t0 = time.monotonic()
     dt = 1.0 / rate_hz
     timed_out = False
@@ -62,7 +78,7 @@ def move_to_absolute_yaw(
 
         current_abs = read_yaw(driver, fresh=True)
         att, age_s = driver.get_attitude()
-        error = angle_diff(abs_target, current_abs)
+        error = linear_yaw_error(abs_target, current_abs)
         elapsed = time.monotonic() - t0
 
         if on_update is not None:
@@ -82,7 +98,8 @@ def move_to_absolute_yaw(
             break
 
         direction = 1 if error > 0 else -1
-        driver.set_gimbal_speed(direction * yaw_speed * invert_yaw, 0)
+        cmd = direction * scaled_yaw_speed(abs(error), yaw_speed) * invert_yaw
+        driver.set_gimbal_speed(cmd, 0)
         time.sleep(dt)
 
     driver.set_gimbal_speed(0, 0)
@@ -92,7 +109,7 @@ def move_to_absolute_yaw(
     return {
         'target': abs_target,
         'reached': reached_abs,
-        'error': angle_diff(abs_target, reached_abs),
+        'error': linear_yaw_error(abs_target, reached_abs),
         'duration_s': time.monotonic() - t0,
         'timed_out': timed_out,
     }

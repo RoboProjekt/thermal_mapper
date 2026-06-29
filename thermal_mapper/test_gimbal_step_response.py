@@ -11,11 +11,12 @@ import sys
 import time
 
 from thermal_mapper.gimbal_control import (
-    angle_diff,
     calibrate_yaw_direction,
+    clamp_yaw,
+    linear_yaw_error,
     move_to_absolute_yaw,
-    normalize_angle,
     read_yaw,
+    scaled_yaw_speed,
 )
 from thermal_mapper.log_utils import ts, ts_iso
 from thermal_mapper.siyi_driver import SiyiGimbalDriver
@@ -74,7 +75,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    target = normalize_angle(args.target)
+    target = clamp_yaw(args.target)
     driver = None
     t0 = time.monotonic()
     dt = 1.0 / max(1.0, args.sample_hz)
@@ -121,7 +122,7 @@ def main():
 
                 if not move_done:
                     current = read_yaw(driver, fresh=True)
-                    error = angle_diff(target, current)
+                    error = linear_yaw_error(target, current)
                     elapsed_move = now - move_t0
 
                     if abs(error) <= args.tolerance_deg:
@@ -139,7 +140,9 @@ def main():
                         print(f'[{ts()}] Move-Timeout nach {elapsed_move:.1f}s')
                     else:
                         direction = 1 if error > 0 else -1
-                        cmd_speed = direction * args.yaw_speed * invert_yaw
+                        cmd_speed = direction * scaled_yaw_speed(
+                            abs(error), args.yaw_speed
+                        ) * invert_yaw
                         driver.set_gimbal_speed(cmd_speed, 0)
                     phase = 'move' if not move_done else 'settle'
                 else:

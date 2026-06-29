@@ -17,7 +17,8 @@ class SiyiGimbalDriver:
         self._sock_lock = threading.Lock()
         self._att_lock = threading.Lock()
         self.current_attitude = {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
-        self.attitude_updated_mono = 0.0
+        self.attitude_updated_mono = time.monotonic()
+        self.has_attitude = False
         self.last_drain_count = 0
         self.running = True
         self.seq = 0
@@ -58,6 +59,7 @@ class SiyiGimbalDriver:
                 self.current_attitude["pitch"] = pitch / 10.0
                 self.current_attitude["roll"] = roll / 10.0
                 self.attitude_updated_mono = time.monotonic()
+                self.has_attitude = True
             return True
         return False
 
@@ -97,7 +99,10 @@ class SiyiGimbalDriver:
         if fresh:
             self.refresh_attitude()
         with self._att_lock:
-            age = time.monotonic() - self.attitude_updated_mono
+            if not self.has_attitude:
+                age = float('inf')
+            else:
+                age = time.monotonic() - self.attitude_updated_mono
             return dict(self.current_attitude), age
 
     def set_gimbal_speed(self, yaw_speed, pitch_speed):

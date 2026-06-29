@@ -15,8 +15,8 @@ from tf2_ros import TransformBroadcaster
 
 from thermal_mapper.gimbal_control import (
     calibrate_yaw_direction,
+    clamp_yaw,
     move_to_absolute_yaw,
-    normalize_angle,
 )
 from thermal_mapper.gimbal_tf_utils import send_gimbal_transforms
 from thermal_mapper.log_utils import ts
@@ -80,9 +80,13 @@ class GimbalManualTestNode(Node):
 
     def format_yaw_status(self, fresh=True):
         att, age_s = self.driver.get_attitude(fresh=fresh)
+        if age_s == float('inf'):
+            age_str = 'keine Daten'
+        else:
+            age_str = f'{age_s * 1000:.0f} ms'
         return (
             f'[{ts()}] Yaw {att["yaw"]:+7.1f} deg  '
-            f'(Telemetrie-Alter {age_s * 1000:.0f} ms, '
+            f'(Telemetrie-Alter {age_str}, '
             f'drain {self.driver.last_drain_count})'
         )
 
@@ -98,7 +102,7 @@ class GimbalManualTestNode(Node):
         )
 
     def move_to(self, abs_target):
-        abs_target = normalize_angle(abs_target)
+        abs_target = clamp_yaw(abs_target)
         self.get_logger().info(
             f'[{ts()}] Fahre zu absolut {abs_target:+.1f} deg ...'
         )
@@ -136,7 +140,7 @@ class GimbalManualTestNode(Node):
         print()
         print('=' * 58)
         print(f'[{ts()}] Manueller Gimbal-Test (absolute Yaw + TF)')
-        print('Eingabe = absoluter Zielwinkel, z.B. 0, 90, -180')
+        print('Eingabe = absoluter Zielwinkel, Bereich -270 bis +270 Grad')
         print('=' * 58)
         print('  <zahl>   Absoluter Ziel-Yaw')
         print('  s        Status (frische Telemetrie)')
